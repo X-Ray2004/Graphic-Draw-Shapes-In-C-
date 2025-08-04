@@ -1,0 +1,2010 @@
+#define _USE_MATH_DEFINES
+#include <windows.h>
+#include <commdlg.h>
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+#include <string>
+#include <fstream>
+#include <stack>
+#include <queue>
+
+// Add this line to link against the Common Dialog Box library
+
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "kernel32.lib")
+
+using namespace std;
+
+// [Rest of your existing code remains exactly the same...]
+string GetColorName(COLORREF color) {
+    switch (color) {
+    case RGB(255, 0, 0): return "Red";
+    case RGB(0, 255, 0): return "Green";
+    case RGB(0, 0, 255): return "Blue";
+    case RGB(255, 255, 0): return "Yellow";
+    case RGB(0, 0, 0): return "Black";
+    case RGB(255, 255, 255): return "White";
+    default: {
+        char hex[10];
+        sprintf_s(hex, "#%06X", color & 0xFFFFFF);
+        return string(hex);
+    }
+    }
+}
+// Structs
+struct Vector2D
+{
+    double x, y;
+    Vector2D(double x = 0, double y = 0) : x(x), y(y) {}
+};
+
+struct Point
+{
+    int x, y;
+    Point(int x = 0, int y = 0) : x(x), y(y) {}
+};
+
+struct ClipRect {
+    int xmin, ymin, xmax, ymax;
+    ClipRect(int x1, int y1, int x2, int y2) : xmin(x1), ymin(y1), xmax(x2), ymax(y2) {}
+    operator RECT() const { RECT r = { xmin, ymin, xmax, ymax }; return r; } // Conversion to RECT
+};
+// Existing includes and globals...
+
+
+
+struct Shape
+{
+    int type; // 1-4: Circle quarters (Lines), 5-8: Circle quarters (Circles),
+    // 9: Square, 10: Rectangle, 11: Polygons, 12: Cardinal Spline
+    // 13-15: Line algorithms, 16-20: Circle algorithms, 21-23: Ellipse
+    // 24: Flood fill, 25-29: Clipping
+    int subtype; // For variations within same shape type
+    Point center;
+    int size1, size2; // Radius, width, height etc.
+    COLORREF color;
+    vector<Point> points;
+    double tension;
+    string algorithm; // Which algorithm was used
+};
+
+// Global variables
+HBRUSH g_hbrBackground = NULL;
+HCURSOR g_hCursor = NULL;
+COLORREF g_selectedColor = RGB(255, 0, 0);
+HMENU g_hMenu = NULL;
+bool g_showMenu = false;
+int g_selectedShape = 0;
+int g_selectedSubtype = 0;
+bool g_isDrawing = false;
+Point g_startPoint;
+vector<Shape> g_shapes;
+vector<Point> g_tempControlPoints;
+vector<Point> g_tempPolygonPoints;
+float g_tension = 0.5f;
+int g_numSegments = 30;
+bool g_colorSelected = false;
+ClipRect g_clipRect(100, 100, 400, 300);
+Point g_floodFillSeed;
+bool g_floodFillMode = false;
+bool g_clippingMode = false;
+bool g_stopFloodFill = false;
+
+const int CLIP_LEFT = 100, CLIP_RIGHT = 400, CLIP_TOP = 100, CLIP_BOTTOM = 300;
+enum ClipEdgeType {
+    CLIP_EDGE_LEFT,
+    CLIP_EDGE_RIGHT,
+    CLIP_EDGE_TOP,
+    CLIP_EDGE_BOTTOM
+};
+vector<Point> currentPolygon;
+vector<vector<Point>> drawnPolygons;
+// Menu IDs
+#define ID_CLEAR_CLIPPING   1065
+#define ID_COLOR_RED        1001
+#define ID_COLOR_GREEN      1002
+#define ID_COLOR_BLUE       1003
+#define ID_COLOR_YELLOW     1004
+#define ID_BG_WHITE         1005
+#define ID_BG_BLACK         1006
+#define ID_CLEAR_SCREEN     1007
+#define ID_SAVE_FILE        1008
+#define ID_LOAD_FILE        1009
+
+// Line algorithms
+#define ID_LINE_DDA         1010
+#define ID_LINE_MIDPOINT    1011
+#define ID_LINE_PARAMETRIC  1012
+
+// Circle algorithms
+#define ID_CIRCLE_DIRECT    1020
+#define ID_CIRCLE_POLAR     1021
+#define ID_CIRCLE_ITER_POLAR 1022
+#define ID_CIRCLE_MIDPOINT  1023
+#define ID_CIRCLE_MODIFIED  1024
+
+// Circle filling
+#define ID_CIRCLE_FILL_LINES_Q1  1030
+#define ID_CIRCLE_FILL_LINES_Q2  1031
+#define ID_CIRCLE_FILL_LINES_Q3  1032
+#define ID_CIRCLE_FILL_LINES_Q4  1033
+#define ID_CIRCLE_FILL_CIRCLES_Q1 1034
+#define ID_CIRCLE_FILL_CIRCLES_Q2 1035
+#define ID_CIRCLE_FILL_CIRCLES_Q3 1036
+#define ID_CIRCLE_FILL_CIRCLES_Q4 1037
+
+// Advanced shapes
+#define ID_SQUARE_HERMITE   1040
+#define ID_RECT_BEZIER      1041
+#define ID_POLYGON_CONVEX   1042
+#define ID_FLOOD_RECURSIVE  1043
+#define ID_FLOOD_ITERATIVE  1044
+#define ID_CARDINAL_SPLINE  1045
+
+// Ellipse algorithms
+#define ID_ELLIPSE_DIRECT   1050
+#define ID_ELLIPSE_POLAR    1051
+#define ID_ELLIPSE_MIDPOINT 1052
+
+// Clipping algorithms
+#define ID_CLIP_POINT_RECT  1060
+#define ID_CLIP_LINE_RECT   1061
+#define ID_CLIP_POLYGON_RECT 1062
+#define ID_CLIP_POINT_SQUARE 1063
+#define ID_CLIP_LINE_SQUARE  1064
+
+// Forward declarations
+void SaveToFile(HWND hwnd);
+void LoadFromFile(HWND hwnd);
+void DrawLineDDA(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color);
+void DrawLineMidpoint(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color);
+void DrawLineParametric(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color);
+void DrawCircleDirect(HDC hdc, int xc, int yc, int r, COLORREF color);
+void DrawCirclePolar(HDC hdc, int xc, int yc, int r, COLORREF color);
+void DrawCircleIterativePolar(HDC hdc, int xc, int yc, int r, COLORREF color);
+void DrawCircleMidpoint(HDC hdc, int xc, int yc, int r, COLORREF color);
+void DrawCircleModified(HDC hdc, int xc, int yc, int r, COLORREF color);
+void DrawEllipseDirect(HDC hdc, int xc, int yc, int a, int b, COLORREF color);
+void DrawEllipsePolar(HDC hdc, int xc, int yc, int a, int b, COLORREF color);
+void DrawEllipseMidpoint(HDC hdc, int xc, int yc, int a, int b, COLORREF color);
+void DrawHermiteCurve(HDC hdc, Vector2D p0, Vector2D p1, Vector2D t0, Vector2D t1, int steps, COLORREF c);
+void DrawBezierCurve(HDC hdc, Vector2D& p0, Vector2D& p1, Vector2D& p2, Vector2D& p3, int numpoints, COLORREF c);
+void FloodFillRecursive(HDC hdc, int x, int y, COLORREF newColor, COLORREF oldColor, COLORREF borderColor, HWND hwnd);
+void FloodFillIterative(HDC hdc, int x, int y, COLORREF newColor, COLORREF oldColor, COLORREF borderColor, HWND hwnd);
+bool ClipPoint(Point p, ClipRect rect);
+bool ClipLine(Point& p1, Point& p2, ClipRect rect);
+vector<Point> ClipPolygon(const vector<Point>& polygon, const RECT& clipRect);
+void DrawCircleFillLines(HDC hdc, int xc, int yc, int r, COLORREF color, int quarter);
+void DrawCircleFillCircles(HDC hdc, int xc, int yc, int r, COLORREF color, int quarter);
+void DrawCardinalSpline(HDC hdc, const vector<Point>& points, double tension, int segments, COLORREF color);
+
+bool isInside(const Point& p, ClipEdgeType edgeType);
+Point computeIntersection(const Point& p1, const Point& p2, ClipEdgeType edgeType);
+vector<Point> sutherlandHodgmanClip(const vector<Point>& inputPolygon, const RECT& clipRect);
+
+void DrawSquare(HDC hdc, int x, int y, int size, COLORREF c) {
+    HPEN pen = CreatePen(PS_SOLID, 1, c);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    MoveToEx(hdc, x, y, NULL);
+    LineTo(hdc, x + size, y);
+    LineTo(hdc, x + size, y + size);
+    LineTo(hdc, x, y + size);
+    LineTo(hdc, x, y);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+void DrawRectangle(HDC hdc, int x, int y, int width, int height, COLORREF c) {
+    HPEN pen = CreatePen(PS_SOLID, 1, c);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    MoveToEx(hdc, x, y, NULL);
+    LineTo(hdc, x + width, y);
+    LineTo(hdc, x + width, y + height);
+    LineTo(hdc, x, y + height);
+    LineTo(hdc, x, y);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+// ================== CIRCLE FILL ALGORITHMS ==================
+
+void DrawCircleFillLines(HDC hdc, int xc, int yc, int r, COLORREF color, int quarter)
+{
+    for (int y = yc - r; y <= yc + r; y++)
+    {
+        int dx = (int)(sqrt(max(0, r * r - (y - yc) * (y - yc))) + 0.5);
+        switch (quarter)
+        {
+        case 1: // First quarter
+            for (int x = xc; x <= xc + dx; x++)
+            {
+                if (y <= yc) SetPixel(hdc, x, y, color);
+            }
+            break;
+        case 2: // Second quarter
+            for (int x = xc - dx; x <= xc; x++)
+            {
+                if (y <= yc) SetPixel(hdc, x, y, color);
+            }
+            break;
+        case 3: // Third quarter
+            for (int x = xc - dx; x <= xc; x++)
+            {
+                if (y >= yc) SetPixel(hdc, x, y, color);
+            }
+            break;
+        case 4: // Fourth quarter
+            for (int x = xc; x <= xc + dx; x++)
+            {
+                if (y >= yc) SetPixel(hdc, x, y, color);
+            }
+            break;
+        }
+    }
+}
+
+void DrawCircleFillCircles(HDC hdc, int xc, int yc, int r, COLORREF color, int quarter)
+{
+    const int smallRadius = 5; // Radius of smaller circles
+    const int step = smallRadius * 2; // Step size to avoid overlap
+
+    for (int y = yc - r; y <= yc + r; y += step)
+    {
+        int dx = (int)(sqrt(max(0, r * r - (y - yc) * (y - yc))) + 0.5);
+        for (int x = xc - dx; x <= xc + dx; x += step)
+        {
+            // Check if center of small circle is within the large circle
+            int distSquared = (x - xc) * (x - xc) + (y - yc) * (y - yc);
+            if (distSquared > r * r) continue;
+
+            bool draw = false;
+            switch (quarter)
+            {
+            case 1: // First quarter (x >= xc, y <= yc)
+                if (x >= xc && y <= yc) draw = true;
+                break;
+            case 2: // Second quarter (x <= xc, y <= yc)
+                if (x <= xc && y <= yc) draw = true;
+                break;
+            case 3: // Third quarter (x <= xc, y >= yc)
+                if (x <= xc && y >= yc) draw = true;
+                break;
+            case 4: // Fourth quarter (x >= xc, y >= yc)
+                if (x >= xc && y >= yc) draw = true;
+                break;
+            }
+            if (draw)
+            {
+                DrawCircleMidpoint(hdc, x, y, smallRadius, color);
+            }
+        }
+    }
+}
+
+
+
+// ================== CARDINAL SPLINE ==================
+
+void DrawCardinalSpline(HDC hdc, const vector<Point>& points, double tension, int segments, COLORREF color)
+{
+    if (points.size() < 2) return;
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+
+    for (size_t i = 0; i < points.size() - 1; i++)
+    {
+        Vector2D p0 = (i > 0) ? Vector2D(points[i - 1].x, points[i - 1].y) : Vector2D(points[i].x, points[i].y);
+        Vector2D p1 = Vector2D(points[i].x, points[i].y);
+        Vector2D p2 = Vector2D(points[i + 1].x, points[i + 1].y);
+        Vector2D p3 = (i + 2 < points.size()) ? Vector2D(points[i + 2].x, points[i + 2].y) : Vector2D(points[i + 1].x, points[i + 1].y);
+
+        for (int j = 0; j <= segments; j++)
+        {
+            double t = (double)j / segments;
+            double t2 = t * t;
+            double t3 = t2 * t;
+            double s = (1 - tension) / 2;
+
+            double h1 = 2 * t3 - 3 * t2 + 1;
+            double h2 = -2 * t3 + 3 * t2;
+            double h3 = t3 - 2 * t2 + t;
+            double h4 = t3 - t2;
+
+            double x = h1 * p1.x + h2 * p2.x + h3 * s * (p2.x - p0.x) + h4 * s * (p3.x - p1.x);
+            double y = h1 * p1.y + h2 * p2.y + h3 * s * (p2.y - p0.y) + h4 * s * (p3.y - p1.y);
+
+            int ix = (int)(x + 0.5);
+            int iy = (int)(y + 0.5);
+
+            if (j == 0 && (i == 0 || j == 0))
+            {
+                MoveToEx(hdc, ix, iy, NULL);
+            }
+            else
+            {
+                LineTo(hdc, ix, iy);
+            }
+        }
+    }
+
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+// ================== LINE ALGORITHMS ==================
+
+void DrawLineDDA(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color)
+{
+    int dx = x2 - x1;
+    int dy = y2 - y1;
+    int steps = max(abs(dx), abs(dy));
+
+    if (steps == 0)
+    {
+        SetPixel(hdc, x1, y1, color);
+        return;
+    }
+
+    float xIncrement = (float)dx / steps;
+    float yIncrement = (float)dy / steps;
+
+    float x = (float)x1;
+    float y = (float)y1;
+
+    for (int i = 0; i <= steps; i++)
+    {
+        SetPixel(hdc, (int)(x + 0.5), (int)(y + 0.5), color);
+        x += xIncrement;
+        y += yIncrement;
+    }
+}
+
+void DrawLineMidpoint(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color)
+{
+    int dx = abs(x2 - x1);
+    int dy = abs(y2 - y1);
+    int x = x1, y = y1;
+    int xInc = (x1 < x2) ? 1 : -1;
+    int yInc = (y1 < y2) ? 1 : -1;
+    int error = dx - dy;
+
+    while (true)
+    {
+        SetPixel(hdc, x, y, color);
+        if (x == x2 && y == y2) break;
+
+        int error2 = 2 * error;
+        if (error2 > -dy)
+        {
+            error -= dy;
+            x += xInc;
+        }
+        if (error2 < dx)
+        {
+            error += dx;
+            y += yInc;
+        }
+    }
+}
+
+void DrawLineParametric(HDC hdc, int x1, int y1, int x2, int y2, COLORREF color)
+{
+    int dx = x2 - x1;
+    int dy = y2 - y1;
+    int steps = max(abs(dx), abs(dy));
+
+    for (int i = 0; i <= steps; i++)
+    {
+        float t = (steps > 0) ? (float)i / steps : 0;
+        int x = (int)(x1 + t * dx + 0.5);
+        int y = (int)(y1 + t * dy + 0.5);
+        SetPixel(hdc, x, y, color);
+    }
+}
+
+// ================== CIRCLE ALGORITHMS ==================
+
+void DrawCircleDirect(HDC hdc, int xc, int yc, int r, COLORREF color)
+{
+    for (int x = xc - r; x <= xc + r; x++)
+    {
+        int y1 = (int)(yc + sqrt(r * r - (x - xc) * (x - xc)) + 0.5);
+        int y2 = (int)(yc - sqrt(r * r - (x - xc) * (x - xc)) + 0.5);
+        if (abs((x - xc) * (x - xc)) <= r * r)
+        {
+            SetPixel(hdc, x, y1, color);
+            SetPixel(hdc, x, y2, color);
+        }
+    }
+}
+
+void DrawCirclePolar(HDC hdc, int xc, int yc, int r, COLORREF color)
+{
+    double dTheta = 1.0 / r;
+    for (double theta = 0; theta <= 2 * M_PI; theta += dTheta)
+    {
+        int x = (int)(xc + r * cos(theta) + 0.5);
+        int y = (int)(yc + r * sin(theta) + 0.5);
+        SetPixel(hdc, x, y, color);
+    }
+}
+
+void DrawCircleIterativePolar(HDC hdc, int xc, int yc, int r, COLORREF color)
+{
+    double theta = 0;
+    double dTheta = 1.0 / r;
+    double cosD = cos(dTheta);
+    double sinD = sin(dTheta);
+    double x = r, y = 0;
+
+    while (theta <= 2 * M_PI)
+    {
+        SetPixel(hdc, (int)(xc + x + 0.5), (int)(yc + y + 0.5), color);
+        double newX = x * cosD - y * sinD;
+        double newY = x * sinD + y * cosD;
+        x = newX;
+        y = newY;
+        theta += dTheta;
+    }
+}
+
+void DrawCircleMidpoint(HDC hdc, int xc, int yc, int r, COLORREF color) {
+    int x = 0, y = r;
+    int d = 1 - r;
+
+    auto plotCirclePoints = [hdc, xc, yc, color](int x, int y) {
+        SetPixel(hdc, xc + x, yc + y, color);
+        SetPixel(hdc, xc - x, yc + y, color);
+        SetPixel(hdc, xc + x, yc - y, color);
+        SetPixel(hdc, xc - x, yc - y, color);
+        SetPixel(hdc, xc + y, yc + x, color);
+        SetPixel(hdc, xc - y, yc + x, color);
+        SetPixel(hdc, xc + y, yc - x, color);
+        SetPixel(hdc, xc - y, yc - x, color);
+        };
+
+    plotCirclePoints(x, y);
+
+    while (x < y) {
+        if (d < 0) {
+            d += 2 * x + 3;
+        }
+        else {
+            d += 2 * (x - y) + 5;
+            y--;
+        }
+        x++;
+        plotCirclePoints(x, y);
+    }
+}
+
+void DrawCircleModified(HDC hdc, int xc, int yc, int r, COLORREF color) {
+    int x = 0, y = r;
+    int d = 1 - r;
+
+    auto plotCirclePointsModified = [hdc, xc, yc, color](int x, int y) {
+        SetPixel(hdc, xc + x, yc + y, color);
+        SetPixel(hdc, xc - x, yc + y, color);
+        SetPixel(hdc, xc + x, yc - y, color);
+        SetPixel(hdc, xc - x, yc - y, color);
+        SetPixel(hdc, xc + y, yc + x, color);
+        SetPixel(hdc, xc - y, yc + x, color);
+        SetPixel(hdc, xc + y, yc - x, color);
+        SetPixel(hdc, xc - y, yc - x, color);
+        };
+
+    plotCirclePointsModified(x, y);
+
+    while (x < y) {
+        if (d < 0) {
+            d += 2 * x + 3;
+        }
+        else {
+            d += 2 * (x - y) + 5;
+            y--;
+        }
+        x++;
+        plotCirclePointsModified(x, y);
+    }
+}
+
+// ================== ELLIPSE ALGORITHMS ==================
+
+void DrawEllipseDirect(HDC hdc, int xc, int yc, int a, int b, COLORREF color)
+{
+    for (int x = xc - a; x <= xc + a; x++)
+    {
+        int dx = x - xc;
+        if (dx * dx <= a * a)
+        {
+            int dy = (int)(b * sqrt(1.0 - (double)(dx * dx) / (a * a)) + 0.5);
+            SetPixel(hdc, x, yc + dy, color);
+            SetPixel(hdc, x, yc - dy, color);
+        }
+    }
+}
+
+void DrawEllipsePolar(HDC hdc, int xc, int yc, int a, int b, COLORREF color)
+{
+    double dTheta = 1.0 / max(a, b);
+    for (double theta = 0; theta <= 2 * M_PI; theta += dTheta)
+    {
+        int x = (int)(xc + a * cos(theta) + 0.5);
+        int y = (int)(yc + b * sin(theta) + 0.5);
+        SetPixel(hdc, x, y, color);
+    }
+}
+
+void DrawEllipseMidpoint(HDC hdc, int xc, int yc, int a, int b, COLORREF color)
+{
+    int x = 0, y = b;
+    int a2 = a * a, b2 = b * b;
+    int fx = 0, fy = 2 * a2 * y;
+    int p = b2 - a2 * b + a2 / 4;
+
+    auto plotEllipsePoints = [&](int x, int y)
+        {
+            SetPixel(hdc, xc + x, yc + y, color);
+            SetPixel(hdc, xc - x, yc + y, color);
+            SetPixel(hdc, xc + x, yc - y, color);
+            SetPixel(hdc, xc - x, yc - y, color);
+        };
+
+    plotEllipsePoints(x, y);
+
+    // Region 1
+    while (fx < fy)
+    {
+        x++;
+        fx += 2 * b2;
+        if (p < 0)
+        {
+            p += fx + b2;
+        }
+        else
+        {
+            y--;
+            fy -= 2 * a2;
+            p += fx - fy + b2;
+        }
+        plotEllipsePoints(x, y);
+    }
+
+    // Region 2
+    p = b2 * (x + 0.5) * (x + 0.5) + a2 * (y - 1) * (y - 1) - a2 * b2;
+    while (y > 0)
+    {
+        y--;
+        fy -= 2 * a2;
+        if (p >= 0)
+        {
+            p += a2 - fy;
+        }
+        else
+        {
+            x++;
+            fx += 2 * b2;
+            p += fx - fy + a2;
+        }
+        plotEllipsePoints(x, y);
+    }
+}
+
+// ================== CURVE ALGORITHMS ==================
+
+void DrawHermiteCurve(HDC hdc, Vector2D p0, Vector2D p1, Vector2D t0, Vector2D t1, int steps, COLORREF c) {
+    if (steps < 2) return;
+    HPEN pen = CreatePen(PS_SOLID, 1, c);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    for (int i = 0; i <= steps; i++) {
+        double t = (double)i / steps;
+        double t2 = t * t;
+        double t3 = t2 * t;
+        double h1 = 2 * t3 - 3 * t2 + 1;
+        double h2 = -2 * t3 + 3 * t2;
+        double h3 = t3 - 2 * t2 + t;
+        double h4 = t3 - t2;
+        double x = h1 * p0.x + h2 * p1.x + h3 * t0.x + h4 * t1.x;
+        double y = h1 * p0.y + h2 * p1.y + h3 * t0.y + h4 * t1.y;
+        int ix = static_cast<int>(round(x));
+        int iy = static_cast<int>(round(y));
+        if (i == 0) {
+            MoveToEx(hdc, ix, iy, NULL);
+        }
+        else {
+            LineTo(hdc, ix, iy);
+        }
+    }
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+void DrawBezierCurve(HDC hdc, Vector2D& p0, Vector2D& p1, Vector2D& p2, Vector2D& p3, int numpoints, COLORREF c)
+{
+    if (numpoints < 2) return;
+    double dt = 1.0 / (numpoints - 1);
+    HPEN pen = CreatePen(PS_SOLID, 1, c);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+
+    for (double t = 0; t <= 1.0; t += dt)
+    {
+        double u = 1.0 - t;
+        double u2 = u * u;
+        double u3 = u2 * u;
+        double t2 = t * t;
+        double t3 = t2 * t;
+        double x = u3 * p0.x + 3 * u2 * t * p1.x + 3 * u * t2 * p2.x + t3 * p3.x;
+        double y = u3 * p0.y + 3 * u2 * t * p1.y + 3 * u * t2 * p2.y + t3 * p3.y;
+        int ix = (int)(x + 0.5);
+        int iy = (int)(y + 0.5);
+        if (t < 1e-6)
+        {
+            MoveToEx(hdc, ix, iy, NULL);
+        }
+        else
+        {
+            LineTo(hdc, ix, iy);
+        }
+    }
+
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+// ================== FILLING ALGORITHMS ==================
+
+void FloodFillRecursive(HDC hdc, int x, int y, COLORREF newColor, COLORREF oldColor, COLORREF borderColor, HWND hwnd)
+{
+    // Boundary check
+    RECT clientRect;
+    GetClientRect(hwnd, &clientRect);
+    if (x < clientRect.left || x >= clientRect.right ||
+        y < clientRect.top || y >= clientRect.bottom)
+        return;
+
+    // Stop condition
+    if (g_stopFloodFill) return;
+
+    COLORREF pixelColor = GetPixel(hdc, x, y);
+    if (pixelColor == borderColor || pixelColor != oldColor || newColor == oldColor) return;
+
+    SetPixel(hdc, x, y, newColor);
+    FloodFillRecursive(hdc, x + 1, y, newColor, oldColor, borderColor, hwnd);
+    FloodFillRecursive(hdc, x - 1, y, newColor, oldColor, borderColor, hwnd);
+    FloodFillRecursive(hdc, x, y + 1, newColor, oldColor, borderColor, hwnd);
+    FloodFillRecursive(hdc, x, y - 1, newColor, oldColor, borderColor, hwnd);
+}
+
+void FloodFillIterative(HDC hdc, int x, int y, COLORREF newColor, COLORREF oldColor, COLORREF borderColor, HWND hwnd)
+{
+    if (newColor == oldColor) return;
+
+    // Get client area bounds
+    RECT clientRect;
+    GetClientRect(hwnd, &clientRect);
+
+    stack<Point> pixelStack;
+    pixelStack.push(Point(x, y));
+
+    while (!pixelStack.empty())
+    {
+        // Check for stop condition
+        MSG msg;
+        if (PeekMessage(&msg, hwnd, WM_LBUTTONDOWN, WM_LBUTTONDOWN, PM_REMOVE)) {
+            g_stopFloodFill = true;
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            break;
+        }
+
+        Point current = pixelStack.top();
+        pixelStack.pop();
+
+        // Boundary check
+        if (current.x < clientRect.left || current.x >= clientRect.right ||
+            current.y < clientRect.top || current.y >= clientRect.bottom)
+            continue;
+
+        COLORREF pixelColor = GetPixel(hdc, current.x, current.y);
+        if (pixelColor == borderColor) continue;
+        if (pixelColor == oldColor)
+        {
+            SetPixel(hdc, current.x, current.y, newColor);
+            if (current.x + 1 < clientRect.right)
+                pixelStack.push(Point(current.x + 1, current.y));
+            if (current.x - 1 >= clientRect.left)
+                pixelStack.push(Point(current.x - 1, current.y));
+            if (current.y + 1 < clientRect.bottom)
+                pixelStack.push(Point(current.x, current.y + 1));
+            if (current.y - 1 >= clientRect.top)
+                pixelStack.push(Point(current.x, current.y - 1));
+        }
+    }
+}
+void DrawLineImproved(HDC hdc, int x1, int y1, int x2, int y2, COLORREF c) {
+    if (x2 < x1) {
+        int temp = x1; x1 = x2; x2 = temp;
+        temp = y1; y1 = y2; y2 = temp;
+    }
+    int deltax = x2 - x1;
+    int deltay = y2 - y1;
+    int abs_deltay = std::abs(deltay);
+    bool y_decrement = (y2 < y1);
+    if (deltax < abs_deltay) return;
+    int x = x1;
+    int y = y1;
+    SetPixel(hdc, x, y, c);
+    int d = deltax - 2 * abs_deltay;
+    int d1 = -2 * abs_deltay;
+    int d2 = 2 * (deltax - abs_deltay);
+    while (x < x2) {
+        if (d > 0) {
+            d += d1;
+            x++;
+        }
+        else {
+            d += d2;
+            x++;
+            y = y_decrement ? y - 1 : y + 1;
+        }
+        SetPixel(hdc, x, y, c);
+    }
+}
+void DrawPolygon(HDC hdc, const vector<Point>& points, COLORREF c) {
+    if (points.size() < 3) return;
+    HPEN pen = CreatePen(PS_SOLID, 1, c);
+    HBRUSH brush = CreateSolidBrush(c);
+    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, brush);
+
+    POINT* gdiPoints = new POINT[points.size()];
+    for (size_t i = 0; i < points.size(); i++) {
+        gdiPoints[i].x = points[i].x;
+        gdiPoints[i].y = points[i].y;
+    }
+
+    Polygon(hdc, gdiPoints, static_cast<int>(points.size()));
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+    delete[] gdiPoints;
+}
+void FillPolygon(HDC hdc, const vector<Point>& points, COLORREF c) {
+    DrawPolygon(hdc, points, c);
+    int min_y = points[0].y, max_y = points[0].y;
+    for (const auto& p : points) {
+        min_y = min(min_y, p.y);
+        max_y = max(max_y, p.y);
+    }
+    for (int y = min_y; y <= max_y; y++) {
+        vector<int> intersections;
+        for (size_t i = 0; i < points.size(); i++) {
+            size_t j = (i + 1) % points.size();
+            int x1 = points[i].x, y1 = points[i].y;
+            int x2 = points[j].x, y2 = points[j].y;
+            if ((y1 <= y && y2 > y) || (y2 <= y && y1 > y)) {
+                double x = x1 + (double)(y - y1) * (x2 - x1) / (y2 - y1);
+                intersections.push_back(static_cast<int>(std::round(x)));
+            }
+        }
+        std::sort(intersections.begin(), intersections.end());
+        for (size_t i = 0; i < intersections.size(); i += 2) {
+            if (i + 1 < intersections.size()) {
+                DrawLineImproved(hdc, intersections[i], y, intersections[i + 1], y, c);
+            }
+        }
+    }
+}
+
+void FillSquareWithHermite(HDC hdc, int x, int y, int size, COLORREF c) {
+    DrawSquare(hdc, x, y, size, c);
+    for (int offset = 0; offset <= size; offset += 5) {
+        Vector2D p0(static_cast<double>(x + offset), static_cast<double>(y));
+        Vector2D p1(static_cast<double>(x + offset), static_cast<double>(y + size));
+        Vector2D t0(0, 50);
+        Vector2D t1(0, -50);
+        DrawHermiteCurve(hdc, p0, p1, t0, t1, 50, c);
+    }
+}
+void FillRectangleWithBezier(HDC hdc, int x, int y, int width, int height, COLORREF c) {
+    DrawRectangle(hdc, x, y, width, height, c);
+    for (int offset = 0; offset <= height; offset += 1) { // Reduced to 1 pixel for dense fill
+        Vector2D p0(static_cast<double>(x), static_cast<double>(y + offset));
+        Vector2D p1(static_cast<double>(x + width / 3.0), static_cast<double>(y + offset + 15)); // Adjusted control point
+        Vector2D p2(static_cast<double>(x + 2.0 * width / 3.0), static_cast<double>(y + offset - 15)); // Adjusted control point
+        Vector2D p3(static_cast<double>(x + width), static_cast<double>(y + offset));
+        DrawBezierCurve(hdc, p0, p1, p2, p3, 50, c);
+    }
+}
+// ================== CLIPPING ALGORITHMS ==================
+
+// Point clipping
+bool ClipPoint(Point p, ClipRect rect)
+{
+    return (p.x >= rect.xmin && p.x <= rect.xmax &&
+        p.y >= rect.ymin && p.y <= rect.ymax);
+}
+
+// Cohen-Sutherland Line Clipping
+bool isInside(const Point& p, ClipEdgeType edgeType) {
+    switch (edgeType) {
+    case CLIP_EDGE_LEFT:   return p.x >= CLIP_LEFT;
+    case CLIP_EDGE_RIGHT:  return p.x <= CLIP_RIGHT;
+    case CLIP_EDGE_TOP:    return p.y >= CLIP_TOP;
+    case CLIP_EDGE_BOTTOM: return p.y <= CLIP_BOTTOM;
+    default: return false;
+    }
+}
+int ComputeOutCode(Point p, ClipRect rect)
+{
+    int code = 0;
+    if (p.x < rect.xmin) code |= 1;      // Left
+    if (p.x > rect.xmax) code |= 2;      // Right
+    if (p.y < rect.ymin) code |= 4;      // Bottom
+    if (p.y > rect.ymax) code |= 8;      // Top
+    return code;
+}
+Point computeIntersection(const Point& p1, const Point& p2, ClipEdgeType edgeType) {
+    Point intersection;
+    double slope = (p2.x - p1.x) ? static_cast<double>(p2.y - p1.y) / (p2.x - p1.x) : 1e10;
+
+    switch (edgeType) {
+    case CLIP_EDGE_LEFT:
+        intersection.x = CLIP_LEFT;
+        intersection.y = p1.y + static_cast<int>(slope * (CLIP_LEFT - p1.x));
+        break;
+    case CLIP_EDGE_RIGHT:
+        intersection.x = CLIP_RIGHT;
+        intersection.y = p1.y + static_cast<int>(slope * (CLIP_RIGHT - p1.x));
+        break;
+    case CLIP_EDGE_TOP:
+        intersection.x = p1.x + static_cast<int>((CLIP_TOP - p1.y) / slope);
+        intersection.y = CLIP_TOP;
+        break;
+    case CLIP_EDGE_BOTTOM:
+        intersection.x = p1.x + static_cast<int>((CLIP_BOTTOM - p1.y) / slope);
+        intersection.y = CLIP_BOTTOM;
+        break;
+    }
+    return intersection;
+}
+vector<Point> sutherlandHodgmanClip(const vector<Point>& inputPolygon, const RECT& clipRect) {
+    vector<Point> outputPolygon = inputPolygon;
+    int left = clipRect.left, right = clipRect.right, top = clipRect.top, bottom = clipRect.bottom;
+
+    auto isInside = [&](const Point& p, int edgeType) {
+        switch (edgeType) {
+        case CLIP_EDGE_LEFT:   return p.x >= left;
+        case CLIP_EDGE_RIGHT:  return p.x <= right;
+        case CLIP_EDGE_TOP:    return p.y >= top;
+        case CLIP_EDGE_BOTTOM: return p.y <= bottom;
+        default: return false;
+        }
+        };
+
+    auto computeIntersection = [&](const Point& p1, const Point& p2, int edgeType) {
+        Point intersection;
+        double slope = (p2.x - p1.x) ? static_cast<double>(p2.y - p1.y) / (p2.x - p1.x) : 1e10;
+
+        switch (edgeType) {
+        case CLIP_EDGE_LEFT:
+            intersection.x = left;
+            intersection.y = p1.y + static_cast<int>(slope * (left - p1.x));
+            break;
+        case CLIP_EDGE_RIGHT:
+            intersection.x = right;
+            intersection.y = p1.y + static_cast<int>(slope * (right - p1.x));
+            break;
+        case CLIP_EDGE_TOP:
+            intersection.x = p1.x + static_cast<int>((top - p1.y) / slope);
+            intersection.y = top;
+            break;
+        case CLIP_EDGE_BOTTOM:
+            intersection.x = p1.x + static_cast<int>((bottom - p1.y) / slope);
+            intersection.y = bottom;
+            break;
+        }
+        return intersection;
+        };
+
+    ClipEdgeType clipEdges[] = { CLIP_EDGE_LEFT, CLIP_EDGE_RIGHT, CLIP_EDGE_BOTTOM, CLIP_EDGE_TOP };
+
+    for (ClipEdgeType edge : clipEdges) {
+        if (outputPolygon.empty()) break;
+        vector<Point> newOutputPolygon;
+        Point p1 = outputPolygon.back();
+        for (const Point& p2 : outputPolygon) {
+            bool p1_inside = isInside(p1, edge);
+            bool p2_inside = isInside(p2, edge);
+            if (p1_inside && p2_inside) newOutputPolygon.push_back(p2);
+            else if (p1_inside && !p2_inside) newOutputPolygon.push_back(computeIntersection(p1, p2, edge));
+            else if (!p1_inside && p2_inside) {
+                newOutputPolygon.push_back(computeIntersection(p1, p2, edge));
+                newOutputPolygon.push_back(p2);
+            }
+            p1 = p2;
+        }
+        outputPolygon = newOutputPolygon;
+    }
+    cout << "ClipPolygon output: ";
+    for (const auto& p : outputPolygon) cout << "(" << p.x << ", " << p.y << ") ";
+    cout << endl;
+    return outputPolygon;
+}
+bool ClipLine(Point& p1, Point& p2, ClipRect rect)
+{
+    int outcode1 = ComputeOutCode(p1, rect);
+    int outcode2 = ComputeOutCode(p2, rect);
+
+    while (true)
+    {
+        if (!(outcode1 | outcode2))
+        {
+            // Both points inside
+            return true;
+        }
+        else if (outcode1 & outcode2)
+        {
+            // Both points outside same region
+            return false;
+        }
+        else
+        {
+            // Line crosses boundary
+            int outcodeOut = outcode1 ? outcode1 : outcode2;
+            Point newPoint;
+
+            if (outcodeOut & 8)         // Top
+            {
+                newPoint.x = p1.x + (p2.x - p1.x) * (rect.ymax - p1.y) / (p2.y - p1.y);
+                newPoint.y = rect.ymax;
+            }
+            else if (outcodeOut & 4)     // Bottom
+            {
+                newPoint.x = p1.x + (p2.x - p1.x) * (rect.ymin - p1.y) / (p2.y - p1.y);
+                newPoint.y = rect.ymin;
+            }
+            else if (outcodeOut & 2)     // Right
+            {
+                newPoint.y = p1.y + (p2.y - p1.y) * (rect.xmax - p1.x) / (p2.x - p1.x);
+                newPoint.x = rect.xmax;
+            }
+            else if (outcodeOut & 1)     // Left
+            {
+                newPoint.y = p1.y + (p2.y - p1.y) * (rect.xmin - p1.x) / (p2.x - p1.x);
+                newPoint.x = rect.xmin;
+            }
+
+            if (outcodeOut == outcode1)
+            {
+                p1 = newPoint;
+                outcode1 = ComputeOutCode(p1, rect);
+            }
+            else
+            {
+                p2 = newPoint;
+                outcode2 = ComputeOutCode(p2, rect);
+            }
+        }
+    }
+}
+
+vector<Point> ClipPolygon(const vector<Point>& polygon, const RECT& clipRect) {
+    return sutherlandHodgmanClip(polygon, clipRect);
+}
+
+void ClearScreen(HWND hwnd)
+{
+    g_shapes.clear();          // Remove all shapes
+    g_tempControlPoints.clear(); // Clear temporary points
+    g_tempPolygonPoints.clear(); // Clear polygon points
+    drawnPolygons.clear();
+    currentPolygon.clear();
+    InvalidateRect(hwnd, NULL, TRUE); // Force redraw
+    cout << "Screen cleared - all shapes removed\n";
+}
+
+void ClearClipping()
+{
+    // Reset to default clipping rectangle
+    g_clipRect = ClipRect(100, 100, 400, 300);
+    g_clippingMode = false;
+}
+
+// ================== FILE I/O ======================
+
+void SaveToFile(HWND hwnd) {
+    OPENFILENAME ofn;
+    wchar_t szFile[260] = { 0 }; // Use wchar_t instead of char for Unicode
+
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
+    ofn.lpstrFilter = L"Graphics Files\0*.gfx\0All Files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+
+    if (GetSaveFileName(&ofn)) {
+        ofstream file(szFile, ios::binary);
+        if (file.is_open()) {
+            // Save number of shapes
+            size_t numShapes = g_shapes.size();
+            file.write((char*)&numShapes, sizeof(numShapes));
+
+            // Save each shape
+            for (const auto& shape : g_shapes) {
+                file.write((char*)&shape.type, sizeof(shape.type));
+                file.write((char*)&shape.subtype, sizeof(shape.subtype));
+                file.write((char*)&shape.center, sizeof(shape.center));
+                file.write((char*)&shape.size1, sizeof(shape.size1));
+                file.write((char*)&shape.size2, sizeof(shape.size2));
+                file.write((char*)&shape.color, sizeof(shape.color));
+                file.write((char*)&shape.tension, sizeof(shape.tension));
+
+                // Save points
+                size_t numPoints = shape.points.size();
+                file.write((char*)&numPoints, sizeof(numPoints));
+                for (const auto& point : shape.points) {
+                    file.write((char*)&point, sizeof(point));
+                }
+
+                // Save algorithm name
+                size_t nameLen = shape.algorithm.length();
+                file.write((char*)&nameLen, sizeof(nameLen));
+                file.write(shape.algorithm.c_str(), nameLen);
+            }
+
+            file.close();
+            MessageBox(hwnd, L"File saved successfully!", L"Save", MB_OK);
+        }
+    }
+}
+void LoadFromFile(HWND hwnd) {
+    OPENFILENAME ofn;
+    wchar_t szFile[260] = { 0 }; // Use wchar_t instead of char for Unicode
+
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t); // Adjust for wide characters
+    ofn.lpstrFilter = L"Graphics Files\0*.gfx\0All Files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+    if (GetOpenFileName(&ofn)) {
+        ifstream file(szFile, ios::binary);
+        if (!file.is_open()) {
+            MessageBox(hwnd, L"Failed to open file!", L"Error", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        g_shapes.clear();
+
+        // Load number of shapes
+        size_t numShapes;
+        file.read((char*)&numShapes, sizeof(numShapes));
+        if (file.fail()) {
+            MessageBox(hwnd, L"Corrupted file: Failed to read number of shapes!", L"Error", MB_OK | MB_ICONERROR);
+            file.close();
+            return;
+        }
+
+        // Load each shape
+        for (size_t i = 0; i < numShapes; i++) {
+            Shape shape = {}; // Initialize with default values
+            file.read((char*)&shape.type, sizeof(shape.type));
+            file.read((char*)&shape.subtype, sizeof(shape.subtype));
+            file.read((char*)&shape.center, sizeof(shape.center));
+            file.read((char*)&shape.size1, sizeof(shape.size1));
+            file.read((char*)&shape.size2, sizeof(shape.size2));
+            file.read((char*)&shape.color, sizeof(shape.color));
+            file.read((char*)&shape.tension, sizeof(shape.tension));
+            if (file.fail()) {
+                MessageBox(hwnd, L"Corrupted file: Failed to read shape data!", L"Error", MB_OK | MB_ICONERROR);
+                file.close();
+                return;
+            }
+
+            // Load points
+            size_t numPoints;
+            file.read((char*)&numPoints, sizeof(numPoints));
+            if (file.fail()) {
+                MessageBox(hwnd, L"Corrupted file: Failed to read number of points!", L"Error", MB_OK | MB_ICONERROR);
+                file.close();
+                return;
+            }
+            shape.points.resize(numPoints);
+            for (size_t j = 0; j < numPoints; j++) {
+                file.read((char*)&shape.points[j], sizeof(Point));
+                if (file.fail()) {
+                    MessageBox(hwnd, L"Corrupted file: Failed to read point data!", L"Error", MB_OK | MB_ICONERROR);
+                    file.close();
+                    return;
+                }
+            }
+
+            // Load algorithm name
+            size_t nameLen;
+            file.read((char*)&nameLen, sizeof(nameLen));
+            if (file.fail() || nameLen > 1000) { // Arbitrary limit to prevent excessive allocation
+                MessageBox(hwnd, L"Corrupted file: Invalid algorithm name length!", L"Error", MB_OK | MB_ICONERROR);
+                file.close();
+                return;
+            }
+            std::string algorithm(nameLen, '\0');
+            file.read(&algorithm[0], nameLen);
+            if (file.fail()) {
+                MessageBox(hwnd, L"Corrupted file: Failed to read algorithm name!", L"Error", MB_OK | MB_ICONERROR);
+                file.close();
+                return;
+            }
+            shape.algorithm = algorithm;
+
+            g_shapes.push_back(shape);
+        }
+
+        file.close();
+        InvalidateRect(hwnd, NULL, TRUE);
+        MessageBox(hwnd, L"File loaded successfully!", L"Load", MB_OK);
+    }
+}
+
+
+// ================== WINDOW PROCEDURE ==================
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    static HDC hdc;
+    static PAINTSTRUCT ps;
+
+    switch (msg)
+    {
+    case WM_CREATE:
+    {
+        if (!AllocConsole()) {
+            MessageBox(hwnd, L"Console Allocation Failed!", L"Error", MB_OK | MB_ICONERROR);
+            break;
+        }
+        FILE* dummy = nullptr;
+        if (freopen_s(&dummy, "CONOUT$", "w", stdout) != 0 || !dummy) {
+            MessageBox(hwnd, L"Console Redirection Failed!", L"Error", MB_OK | MB_ICONERROR);
+            FreeConsole();
+            break;
+        }
+        g_hCursor = LoadCursor(NULL, IDC_CROSS);
+        g_hbrBackground = CreateSolidBrush(RGB(255, 255, 255));
+        g_hMenu = CreateMenu();
+
+        HMENU hColorMenu = CreatePopupMenu();
+        AppendMenu(hColorMenu, MF_STRING, ID_COLOR_RED, L"Red");
+        AppendMenu(hColorMenu, MF_STRING, ID_COLOR_GREEN, L"Green");
+        AppendMenu(hColorMenu, MF_STRING, ID_COLOR_BLUE, L"Blue");
+        AppendMenu(hColorMenu, MF_STRING, ID_COLOR_YELLOW, L"Yellow");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hColorMenu, L"Colors");
+
+        HMENU hBgMenu = CreatePopupMenu();
+        AppendMenu(hBgMenu, MF_STRING, ID_BG_WHITE, L"White");
+        AppendMenu(hBgMenu, MF_STRING, ID_BG_BLACK, L"Black");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hBgMenu, L"Background");
+
+        HMENU hLineMenu = CreatePopupMenu();
+        AppendMenu(hLineMenu, MF_STRING, ID_LINE_DDA, L"DDA Line");
+        AppendMenu(hLineMenu, MF_STRING, ID_LINE_MIDPOINT, L"Midpoint Line");
+        AppendMenu(hLineMenu, MF_STRING, ID_LINE_PARAMETRIC, L"Parametric Line");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hLineMenu, L"Lines");
+
+        HMENU hCircleMenu = CreatePopupMenu();
+        AppendMenu(hCircleMenu, MF_STRING, ID_CIRCLE_DIRECT, L"Direct Circle");
+        AppendMenu(hCircleMenu, MF_STRING, ID_CIRCLE_POLAR, L"Polar Circle");
+        AppendMenu(hCircleMenu, MF_STRING, ID_CIRCLE_ITER_POLAR, L"Iterative Polar Circle");
+        AppendMenu(hCircleMenu, MF_STRING, ID_CIRCLE_MIDPOINT, L"Midpoint Circle");
+        AppendMenu(hCircleMenu, MF_STRING, ID_CIRCLE_MODIFIED, L"Modified Midpoint Circle");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hCircleMenu, L"Circles");
+
+        HMENU hCircleFillLines = CreatePopupMenu();
+        AppendMenu(hCircleFillLines, MF_STRING, ID_CIRCLE_FILL_LINES_Q1, L"Quarter 1");
+        AppendMenu(hCircleFillLines, MF_STRING, ID_CIRCLE_FILL_LINES_Q2, L"Quarter 2");
+        AppendMenu(hCircleFillLines, MF_STRING, ID_CIRCLE_FILL_LINES_Q3, L"Quarter 3");
+        AppendMenu(hCircleFillLines, MF_STRING, ID_CIRCLE_FILL_LINES_Q4, L"Quarter 4");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hCircleFillLines, L"Circle Fill (Lines)");
+
+        HMENU hCircleFillCircles = CreatePopupMenu();
+        AppendMenu(hCircleFillCircles, MF_STRING, ID_CIRCLE_FILL_CIRCLES_Q1, L"Quarter 1");
+        AppendMenu(hCircleFillCircles, MF_STRING, ID_CIRCLE_FILL_CIRCLES_Q2, L"Quarter 2");
+        AppendMenu(hCircleFillCircles, MF_STRING, ID_CIRCLE_FILL_CIRCLES_Q3, L"Quarter 3");
+        AppendMenu(hCircleFillCircles, MF_STRING, ID_CIRCLE_FILL_CIRCLES_Q4, L"Quarter 4");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hCircleFillCircles, L"Circle Fill (Circles)");
+
+        HMENU hEllipseMenu = CreatePopupMenu();
+        AppendMenu(hEllipseMenu, MF_STRING, ID_ELLIPSE_DIRECT, L"Direct Ellipse");
+        AppendMenu(hEllipseMenu, MF_STRING, ID_ELLIPSE_POLAR, L"Polar Ellipse");
+        AppendMenu(hEllipseMenu, MF_STRING, ID_ELLIPSE_MIDPOINT, L"Midpoint Ellipse");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hEllipseMenu, L"Ellipses");
+
+        HMENU hShapesMenu = CreatePopupMenu();
+        AppendMenu(hShapesMenu, MF_STRING, ID_SQUARE_HERMITE, L"Square (Hermite Fill)");
+        AppendMenu(hShapesMenu, MF_STRING, ID_RECT_BEZIER, L"Rectangle (Bezier Fill)");
+        AppendMenu(hShapesMenu, MF_STRING, ID_POLYGON_CONVEX, L"Convex/Non-Convex Polygon");
+        AppendMenu(hShapesMenu, MF_STRING, ID_CARDINAL_SPLINE, L"Cardinal Spline");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hShapesMenu, L"Shapes");
+
+        HMENU hFillMenu = CreatePopupMenu();
+        AppendMenu(hFillMenu, MF_STRING, ID_FLOOD_RECURSIVE, L"Recursive Flood Fill");
+        AppendMenu(hFillMenu, MF_STRING, ID_FLOOD_ITERATIVE, L"Iterative Flood Fill");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hFillMenu, L"Fills");
+
+        HMENU hClipMenu = CreatePopupMenu();
+        AppendMenu(hClipMenu, MF_STRING, ID_CLIP_POINT_RECT, L"Point Clipping (Rectangle)");
+        AppendMenu(hClipMenu, MF_STRING, ID_CLIP_LINE_RECT, L"Line Clipping (Rectangle)");
+        AppendMenu(hClipMenu, MF_STRING, ID_CLIP_POLYGON_RECT, L"Polygon Clipping (Rectangle)");
+        AppendMenu(hClipMenu, MF_STRING, ID_CLIP_POINT_SQUARE, L"Point Clipping (Square)");
+        AppendMenu(hClipMenu, MF_STRING, ID_CLIP_LINE_SQUARE, L"Line Clipping (Square)");
+        AppendMenu(g_hMenu, MF_POPUP, (UINT_PTR)hClipMenu, L"Clipping");
+        AppendMenu(hClipMenu, MF_STRING, ID_CLEAR_CLIPPING, L"Clear Clipping");
+
+        AppendMenu(g_hMenu, MF_STRING, ID_CLEAR_SCREEN, L"Clear Screen");
+        AppendMenu(g_hMenu, MF_STRING, ID_SAVE_FILE, L"Save File");
+        AppendMenu(g_hMenu, MF_STRING, ID_LOAD_FILE, L"Load File");
+
+        SetMenu(hwnd, g_hMenu);
+        break;
+    }
+
+    case WM_COMMAND:
+    {
+        switch (LOWORD(wParam))
+        {
+        case ID_COLOR_RED:
+            g_selectedColor = RGB(255, 0, 0);
+            g_colorSelected = true;
+            cout << "Color selected: Red\n";
+            break;
+        case ID_CLEAR_CLIPPING:
+            ClearClipping();
+            InvalidateRect(hwnd, NULL, TRUE); // Redraw window
+            cout << "Clipping rectangle cleared\n";
+            break;
+        case ID_COLOR_GREEN:
+            g_selectedColor = RGB(0, 255, 0);
+            g_colorSelected = true;
+            cout << "Color selected: Green\n";
+            break;
+        case ID_COLOR_BLUE:
+            g_selectedColor = RGB(0, 0, 255);
+            g_colorSelected = true;
+            cout << "Color selected: Blue\n";
+            break;
+        case ID_COLOR_YELLOW:
+            g_selectedColor = RGB(255, 255, 0);
+            g_colorSelected = true;
+            cout << "Color selected: Yellow\n";
+            break;
+        case ID_CLEAR_SCREEN:
+            ClearScreen(hwnd);
+            break;
+        case ID_BG_WHITE:
+            if (g_hbrBackground) DeleteObject(g_hbrBackground);
+            g_hbrBackground = CreateSolidBrush(RGB(255, 255, 255));
+            InvalidateRect(hwnd, NULL, TRUE);
+            cout << "Background set to White\n";
+            break;
+        case ID_BG_BLACK:
+            if (g_hbrBackground) DeleteObject(g_hbrBackground);
+            g_hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
+            InvalidateRect(hwnd, NULL, TRUE);
+            cout << "Background set to Black\n";
+            break;
+        case ID_SAVE_FILE:
+            SaveToFile(hwnd);
+            break;
+        case ID_LOAD_FILE:
+            LoadFromFile(hwnd);
+            break;
+        case ID_LINE_DDA:
+            g_selectedShape = 13;
+            g_selectedSubtype = ID_LINE_DDA;
+            cout << "Selected: DDA Line\n";
+            break;
+        case ID_LINE_MIDPOINT:
+            g_selectedShape = 14;
+            g_selectedSubtype = ID_LINE_MIDPOINT;
+            cout << "Selected: Midpoint Line\n";
+            break;
+        case ID_LINE_PARAMETRIC:
+            g_selectedShape = 15;
+            g_selectedSubtype = ID_LINE_PARAMETRIC;
+            cout << "Selected: Parametric Line\n";
+            break;
+        case ID_CIRCLE_DIRECT:
+            g_selectedShape = 16;
+            g_selectedSubtype = ID_CIRCLE_DIRECT;
+            cout << "Selected: Direct Circle\n";
+            break;
+        case ID_CIRCLE_POLAR:
+            g_selectedShape = 17;
+            g_selectedSubtype = ID_CIRCLE_POLAR;
+            cout << "Selected: Polar Circle\n";
+            break;
+        case ID_CIRCLE_ITER_POLAR:
+            g_selectedShape = 18;
+            g_selectedSubtype = ID_CIRCLE_ITER_POLAR;
+            cout << "Selected: Iterative Polar Circle\n";
+            break;
+        case ID_CIRCLE_MIDPOINT:
+            g_selectedShape = 19;
+            g_selectedSubtype = ID_CIRCLE_MIDPOINT;
+            cout << "Selected: Midpoint Circle\n";
+            break;
+        case ID_CIRCLE_MODIFIED:
+            g_selectedShape = 20;
+            g_selectedSubtype = ID_CIRCLE_MODIFIED;
+            cout << "Selected: Modified Midpoint Circle\n";
+            break;
+        case ID_CIRCLE_FILL_LINES_Q1:
+            g_selectedShape = 1;
+            g_selectedSubtype = ID_CIRCLE_FILL_LINES_Q1;
+            cout << "Selected: Circle Fill Lines (Q1)\n";
+            break;
+        case ID_CIRCLE_FILL_LINES_Q2:
+            g_selectedShape = 2;
+            g_selectedSubtype = ID_CIRCLE_FILL_LINES_Q2;
+            cout << "Selected: Circle Fill Lines (Q2)\n";
+            break;
+        case ID_CIRCLE_FILL_LINES_Q3:
+            g_selectedShape = 3;
+            g_selectedSubtype = ID_CIRCLE_FILL_LINES_Q3;
+            cout << "Selected: Circle Fill Lines (Q3)\n";
+            break;
+        case ID_CIRCLE_FILL_LINES_Q4:
+            g_selectedShape = 4;
+            g_selectedSubtype = ID_CIRCLE_FILL_LINES_Q4;
+            cout << "Selected: Circle Fill Lines (Q4)\n";
+            break;
+        case ID_CIRCLE_FILL_CIRCLES_Q1:
+            g_selectedShape = 5;
+            g_selectedSubtype = ID_CIRCLE_FILL_CIRCLES_Q1;
+            cout << "Selected: Circle Fill Circles (Q1)\n";
+            break;
+        case ID_CIRCLE_FILL_CIRCLES_Q2:
+            g_selectedShape = 6;
+            g_selectedSubtype = ID_CIRCLE_FILL_CIRCLES_Q2;
+            cout << "Selected: Circle Fill Circles (Q2)\n";
+            break;
+        case ID_CIRCLE_FILL_CIRCLES_Q3:
+            g_selectedShape = 7;
+            g_selectedSubtype = ID_CIRCLE_FILL_CIRCLES_Q3;
+            cout << "Selected: Circle Fill Circles (Q3)\n";
+            break;
+        case ID_CIRCLE_FILL_CIRCLES_Q4:
+            g_selectedShape = 8;
+            g_selectedSubtype = ID_CIRCLE_FILL_CIRCLES_Q4;
+            cout << "Selected: Circle Fill Circles (Q4)\n";
+            break;
+        case ID_SQUARE_HERMITE:
+            g_selectedShape = 9;
+            g_selectedSubtype = ID_SQUARE_HERMITE;
+            cout << "Selected: Square Hermite Fill\n";
+            break;
+        case ID_RECT_BEZIER:
+            g_selectedShape = 10;
+            g_selectedSubtype = ID_RECT_BEZIER;
+            cout << "Selected: Rectangle Bezier Fill\n";
+            break;
+        case ID_POLYGON_CONVEX:
+            g_selectedShape = 11;
+            g_selectedSubtype = ID_POLYGON_CONVEX;
+            cout << "Selected: Convex/Non-Convex Polygon\n";
+            break;
+        case ID_CARDINAL_SPLINE:
+            g_selectedShape = 12;
+            g_selectedSubtype = ID_CARDINAL_SPLINE;
+            cout << "Selected: Cardinal Spline\n";
+            break;
+        case ID_ELLIPSE_DIRECT:
+            g_selectedShape = 21;
+            g_selectedSubtype = ID_ELLIPSE_DIRECT;
+            cout << "Selected: Direct Ellipse\n";
+            break;
+        case ID_ELLIPSE_POLAR:
+            g_selectedShape = 22;
+            g_selectedSubtype = ID_ELLIPSE_POLAR;
+            cout << "Selected: Polar Ellipse\n";
+            break;
+        case ID_ELLIPSE_MIDPOINT:
+            g_selectedShape = 23;
+            g_selectedSubtype = ID_ELLIPSE_MIDPOINT;
+            cout << "Selected: Midpoint Ellipse\n";
+            break;
+        case ID_FLOOD_RECURSIVE:
+            g_selectedShape = 24;
+            g_selectedSubtype = ID_FLOOD_RECURSIVE;
+            g_floodFillMode = true;
+            g_stopFloodFill = false; // Reset stop flag
+            cout << "Selected: Recursive Flood Fill\n";
+            break;
+        case ID_FLOOD_ITERATIVE:
+            g_selectedShape = 24;
+            g_selectedSubtype = ID_FLOOD_ITERATIVE;
+            g_floodFillMode = true;
+            g_stopFloodFill = false; // Reset stop flag
+            cout << "Selected: Iterative Flood Fill\n";
+            break;
+        case ID_CLIP_POINT_RECT:
+            g_selectedShape = 25;
+            g_selectedSubtype = ID_CLIP_POINT_RECT;
+            g_clippingMode = true;
+            cout << "Selected: Point Clipping (Rectangle)\n";
+            break;
+        case ID_CLIP_LINE_RECT:
+            g_selectedShape = 26;
+            g_selectedSubtype = ID_CLIP_LINE_RECT;
+            g_clippingMode = true;
+            cout << "Selected: Line Clipping (Rectangle)\n";
+            break;
+        case ID_CLIP_POLYGON_RECT:
+            g_selectedShape = 27;
+            g_selectedSubtype = ID_CLIP_POLYGON_RECT;
+            g_clippingMode = true;
+            cout << "Selected: Polygon Clipping (Rectangle)\n";
+            break;
+        case ID_CLIP_POINT_SQUARE:
+            g_selectedShape = 28;
+            g_selectedSubtype = ID_CLIP_POINT_SQUARE;
+            g_clippingMode = true;
+            cout << "Selected: Point Clipping (Square)\n";
+            break;
+        case ID_CLIP_LINE_SQUARE:
+            g_selectedShape = 29;
+            g_selectedSubtype = ID_CLIP_LINE_SQUARE;
+            g_clippingMode = true;
+            cout << "Selected: Line Clipping (Square)\n";
+            break;
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN:
+    {
+        if (!g_colorSelected) {
+            MessageBox(hwnd, L"Please select a color first!", L"Error", MB_OK | MB_ICONWARNING);
+            break;
+        }
+        if (g_selectedShape == 0) {
+            MessageBox(hwnd, L"Please select a shape or operation!", L"Error", MB_OK | MB_ICONWARNING);
+            break;
+        }
+        // If flood fill is active, stop it
+        if (g_floodFillMode && g_isDrawing) {
+            g_stopFloodFill = true;
+            cout << "Flood fill stopped by user click\n";
+            break;
+        }
+
+        g_isDrawing = true;
+        g_startPoint.x = LOWORD(lParam);
+        g_startPoint.y = HIWORD(lParam);
+        cout << "Mouse down at (" << g_startPoint.x << ", " << g_startPoint.y << ")\n";
+
+        if (g_selectedShape == 11 || (g_clippingMode && g_selectedShape == 27)) {
+            currentPolygon.push_back(g_startPoint);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        else if (g_selectedShape == 12) { // Cardinal Spline
+            g_tempControlPoints.push_back(g_startPoint);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        break;
+    }
+    case WM_LBUTTONUP:
+    {
+        if (g_isDrawing)
+        {
+            int x2 = LOWORD(lParam);
+            int y2 = HIWORD(lParam);
+            cout << "Mouse up at (" << x2 << ", " << y2 << ")\n";
+
+            hdc = GetDC(hwnd);
+            Shape shape;
+            shape.type = g_selectedShape;
+            shape.subtype = g_selectedSubtype;
+            shape.color = g_selectedColor;
+
+            if (g_floodFillMode)
+            {
+                g_stopFloodFill = false; // Reset stop flag
+                g_floodFillSeed = Point(x2, y2);
+                COLORREF oldColor = GetPixel(hdc, x2, y2);
+                if (g_selectedSubtype == ID_FLOOD_RECURSIVE)
+                    FloodFillRecursive(hdc, x2, y2, g_selectedColor, oldColor, RGB(0, 0, 0), hwnd);
+                else if (g_selectedSubtype == ID_FLOOD_ITERATIVE)
+                    FloodFillIterative(hdc, x2, y2, g_selectedColor, oldColor, RGB(0, 0, 0), hwnd);
+                shape.points.push_back(g_floodFillSeed);
+                shape.algorithm = (g_selectedSubtype == ID_FLOOD_RECURSIVE) ? "Recursive Flood" : "Iterative Flood";
+                g_shapes.push_back(shape);
+                g_isDrawing = false;
+                g_floodFillMode = false; // Exit flood fill mode after completion
+                ReleaseDC(hwnd, hdc);
+                InvalidateRect(hwnd, NULL, TRUE);
+                break;
+            }
+
+            if (g_clippingMode)
+            {
+                if (g_selectedShape == 25 || g_selectedShape == 28)   // Point Clipping
+                {
+                    ClipRect rect = (g_selectedShape == 25) ? g_clipRect : ClipRect(100, 100, 300, 300);
+                    if (ClipPoint(Point(x2, y2), rect))
+                    {
+                        SetPixel(hdc, x2, y2, g_selectedColor);
+                        shape.points.push_back(Point(x2, y2));
+                        shape.algorithm = "Point Clipping";
+                        g_shapes.push_back(shape);
+                    }
+                }
+                else if (g_selectedShape == 26 || g_selectedShape == 29)     // Line Clipping
+                {
+                    ClipRect rect = (g_selectedShape == 26) ? g_clipRect : ClipRect(100, 100, 300, 300);
+                    Point p1 = g_startPoint, p2 = Point(x2, y2);
+                    if (ClipLine(p1, p2, rect))
+                    {
+                        DrawLineDDA(hdc, p1.x, p1.y, p2.x, p2.y, g_selectedColor);
+                        shape.points.push_back(p1);
+                        shape.points.push_back(p2);
+                        shape.algorithm = "Line Clipping";
+                        g_shapes.push_back(shape);
+                    }
+                }
+                else if (g_selectedShape == 27 && g_clippingMode) { // Polygon clipping
+                    shape.points.push_back(Point(x2, y2));
+                    vector<Point> clipped = ClipPolygon(shape.points, g_clipRect); // Use g_clipRect
+                    if (!clipped.empty()) {
+                        HPEN pen = CreatePen(PS_SOLID, 1, g_selectedColor);
+                        HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+                        MoveToEx(hdc, clipped[0].x, clipped[0].y, NULL);
+                        for (size_t i = 1; i < clipped.size(); i++) {
+                            DrawLineDDA(hdc, clipped[i - 1].x, clipped[i - 1].y, clipped[i].x, clipped[i].y, g_selectedColor);
+                        }
+                        DrawLineDDA(hdc, clipped.back().x, clipped.back().y, clipped[0].x, clipped[0].y, g_selectedColor); // Close
+                        SelectObject(hdc, oldPen);
+                        DeleteObject(pen);
+                        shape.points = clipped;
+                        shape.algorithm = "Polygon Clipping";
+                        g_shapes.push_back(shape);
+                    }
+                }
+            }
+            else if (g_selectedShape >= 16 && g_selectedShape <= 20) { // Circles
+                int radius = (int)sqrt(pow(x2 - g_startPoint.x, 2) + pow(y2 - g_startPoint.y, 2));
+                shape.center = g_startPoint;
+                shape.size1 = radius;
+                shape.algorithm = (g_selectedShape == 16) ? "Direct" :
+                    (g_selectedShape == 17) ? "Polar" :
+                    (g_selectedShape == 18) ? "Iterative Polar" :
+                    (g_selectedShape == 19) ? "Midpoint" : "Modified Midpoint";
+                if (g_selectedShape == 16)
+                    DrawCircleDirect(hdc, g_startPoint.x, g_startPoint.y, radius, g_selectedColor);
+                else if (g_selectedShape == 17)
+                    DrawCirclePolar(hdc, g_startPoint.x, g_startPoint.y, radius, g_selectedColor);
+                else if (g_selectedShape == 18)
+                    DrawCircleIterativePolar(hdc, g_startPoint.x, g_startPoint.y, radius, g_selectedColor);
+                else if (g_selectedShape == 19)
+                    DrawCircleMidpoint(hdc, g_startPoint.x, g_startPoint.y, radius, g_selectedColor);
+                else if (g_selectedShape == 20)
+                    DrawCircleModified(hdc, g_startPoint.x, g_startPoint.y, radius, g_selectedColor);
+            }
+            else if (g_selectedShape >= 21 && g_selectedShape <= 23) { // Ellipses
+                int a = abs(x2 - g_startPoint.x);
+                int b = abs(y2 - g_startPoint.y);
+                shape.center = g_startPoint;
+                shape.size1 = a;
+                shape.size2 = b;
+                shape.algorithm = (g_selectedShape == 21) ? "Direct" :
+                    (g_selectedShape == 22) ? "Polar" : "Midpoint";
+                if (g_selectedShape == 21)
+                    DrawEllipseDirect(hdc, g_startPoint.x, g_startPoint.y, a, b, g_selectedColor);
+                else if (g_selectedShape == 22)
+                    DrawEllipsePolar(hdc, g_startPoint.x, g_startPoint.y, a, b, g_selectedColor);
+                else if (g_selectedShape == 23)
+                    DrawEllipseMidpoint(hdc, g_startPoint.x, g_startPoint.y, a, b, g_selectedColor);
+            }
+            else if (g_selectedShape >= 9 && g_selectedShape <= 10) { // Shapes (Square or Rectangle)
+                if (g_selectedShape == 9) { // Square (Hermite Fill)
+                    int dx = abs(x2 - g_startPoint.x);
+                    int dy = abs(y2 - g_startPoint.y);
+                    shape.size1 = max(dx, dy);
+                    shape.center = g_startPoint;
+                    // Calculate top-right corner for square
+                    int X2 = g_startPoint.x + (x2 > g_startPoint.x ? shape.size1 : -shape.size1);
+                    int Y2 = g_startPoint.y + (y2 > g_startPoint.y ? shape.size1 : -shape.size1);
+                    FillSquareWithHermite(hdc, g_startPoint.x, g_startPoint.y, shape.size1, shape.color);
+                    shape.points = { {g_startPoint.x, g_startPoint.y}, {x2, g_startPoint.y}, {x2, y2}, {g_startPoint.x, y2} };
+                    cout << "Drew Square at (" << shape.center.x << ", " << shape.center.y
+                        << ") with side " << shape.size1 << ", color: " << GetColorName(shape.color) << "\n";
+                }
+                else if (g_selectedShape == 10) { // Rectangle (Bezier Fill)
+                    shape.size1 = abs(x2 - g_startPoint.x); // Width
+                    shape.size2 = abs(y2 - g_startPoint.y); // Height
+                    shape.center = g_startPoint;
+                    x2 = g_startPoint.x + (x2 > g_startPoint.x ? shape.size1 : -shape.size1);
+                    y2 = g_startPoint.y + (y2 > g_startPoint.y ? shape.size2 : -shape.size2);
+                    FillRectangleWithBezier(hdc, g_startPoint.x, g_startPoint.y, shape.size1, shape.size2, shape.color);
+                    shape.points = { {g_startPoint.x, g_startPoint.y}, {x2, g_startPoint.y}, {x2, y2}, {g_startPoint.x, y2} };
+                    cout << "Drew Rectangle at (" << shape.center.x << ", " << shape.center.y
+                        << ") with width " << shape.size1 << ", height " << shape.size2 << ", color: " << GetColorName(shape.color) << "\n";
+                }
+
+            }
+            else if (g_selectedShape >= 1 && g_selectedShape <= 4) { // Circle Fill Lines
+                int radius = (int)sqrt(pow(x2 - g_startPoint.x, 2) + pow(y2 - g_startPoint.y, 2));
+                shape.center = g_startPoint;
+                shape.size1 = radius;
+                shape.algorithm = "Fill Lines Q" + to_string(g_selectedShape);
+                DrawCircleFillLines(hdc, g_startPoint.x, g_startPoint.y, radius, g_selectedColor, g_selectedShape);
+            }
+            else if (g_selectedShape >= 5 && g_selectedShape <= 8) { // Circle Fill Circles
+                int radius = (int)sqrt(pow(x2 - g_startPoint.x, 2) + pow(y2 - g_startPoint.y, 2));
+                shape.center = g_startPoint;
+                shape.size1 = radius;
+                shape.algorithm = "Fill Circles Q" + to_string(g_selectedShape - 4);
+                DrawCircleFillCircles(hdc, g_startPoint.x, g_startPoint.y, radius, g_selectedColor, g_selectedShape - 4);
+            }
+            else if (g_selectedShape >= 13 && g_selectedShape <= 15) { // Lines
+                shape.points = { g_startPoint, Point(x2, y2) };
+                shape.algorithm = (g_selectedShape == 13) ? "DDA" :
+                    (g_selectedShape == 14) ? "Midpoint" : "Parametric";
+                if (g_selectedShape == 13)
+                    DrawLineDDA(hdc, g_startPoint.x, g_startPoint.y, x2, y2, g_selectedColor);
+                else if (g_selectedShape == 14)
+                    DrawLineMidpoint(hdc, g_startPoint.x, g_startPoint.y, x2, y2, g_selectedColor);
+                else if (g_selectedShape == 15)
+                    DrawLineParametric(hdc, g_startPoint.x, g_startPoint.y, x2, y2, g_selectedColor);
+            }
+            else if (g_selectedShape == 11) { // Polygon (Convex/Non-Convex)
+                g_tempPolygonPoints.push_back(Point(x2, y2));
+                if (!g_isDrawing) { // Finalize on right-click or manual check
+                    if (g_tempPolygonPoints.size() >= 3) {
+                        HPEN pen = CreatePen(PS_SOLID, 1, g_selectedColor);
+                        HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+                        FillPolygon(hdc, g_tempPolygonPoints, g_selectedColor);
+                        SelectObject(hdc, oldPen);
+                        DeleteObject(pen);
+                        shape.points = g_tempPolygonPoints;
+                        shape.algorithm = "Polygon Fill";
+                        g_shapes.push_back(shape);
+                    }
+                    g_tempPolygonPoints.clear();
+                }
+            }
+
+            if (!shape.points.empty() || shape.size1 != 0) {
+                g_shapes.push_back(shape);
+            }
+            g_isDrawing = false;
+            ReleaseDC(hwnd, hdc);
+        }
+        break;
+    }
+
+    case WM_RBUTTONDOWN: {
+        if (g_clippingMode && g_selectedShape == 27 && currentPolygon.size() >= 3) {
+            hdc = GetDC(hwnd);
+            vector<Point> clipped = sutherlandHodgmanClip(currentPolygon, g_clipRect);
+            if (!clipped.empty()) {
+                drawnPolygons.push_back(clipped);
+                HPEN pen = CreatePen(PS_SOLID, 1, g_selectedColor);
+                HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+                MoveToEx(hdc, clipped[0].x, clipped[0].y, NULL);
+                for (size_t i = 1; i < clipped.size(); i++) {
+                    DrawLineDDA(hdc, clipped[i - 1].x, clipped[i - 1].y, clipped[i].x, clipped[i].y, g_selectedColor);
+                }
+                DrawLineDDA(hdc, clipped.back().x, clipped.back().y, clipped[0].x, clipped[0].y, g_selectedColor); // Close
+                SelectObject(hdc, oldPen);
+                DeleteObject(pen);
+                Shape shape;
+                shape.type = 27;
+                shape.subtype = ID_CLIP_POLYGON_RECT;
+                shape.color = g_selectedColor;
+                shape.points = clipped;
+                shape.algorithm = "Polygon Clipping";
+                g_shapes.push_back(shape);
+            }
+            currentPolygon.clear(); // Clear the current polygon
+            g_isDrawing = false;
+            ReleaseDC(hwnd, hdc);
+            InvalidateRect(hwnd, NULL, FALSE); // Force window repaint
+        }
+        else if (g_selectedShape == 11 && g_tempPolygonPoints.size() >= 3) { // Finish Polygon
+            hdc = GetDC(hwnd);
+            Shape shape;
+            shape.type = g_selectedShape;
+            shape.subtype = g_selectedSubtype;
+            shape.color = g_selectedColor;
+            shape.points = g_tempPolygonPoints;
+            shape.algorithm = "Polygon Fill";
+
+            DrawPolygon(hdc, g_tempPolygonPoints, g_selectedColor); // Draw and fill the polygon
+
+            g_shapes.push_back(shape);
+            g_tempPolygonPoints.clear();
+            g_isDrawing = false;
+            ReleaseDC(hwnd, hdc);
+            InvalidateRect(hwnd, NULL, FALSE); // Force window repaint
+        }
+        else if (g_tempControlPoints.size() >= 2 && g_selectedShape == 12) {
+            hdc = GetDC(hwnd);
+            Shape shape;
+            shape.type = g_selectedShape;
+            shape.subtype = g_selectedSubtype;
+            shape.color = g_selectedColor;
+            shape.points = g_tempControlPoints;
+            shape.tension = g_tension;
+            shape.algorithm = "Cardinal Spline";
+            DrawCardinalSpline(hdc, g_tempControlPoints, g_tension, g_numSegments, g_selectedColor);
+            g_shapes.push_back(shape);
+            g_tempControlPoints.clear();
+            g_isDrawing = false;
+            ReleaseDC(hwnd, hdc);
+        }
+        break;
+    }
+
+    case WM_PAINT: {
+        hdc = BeginPaint(hwnd, &ps);
+        if (g_hbrBackground) {
+            FillRect(hdc, &ps.rcPaint, g_hbrBackground);
+        }
+
+        // Draw all shapes
+        for (const auto& shape : g_shapes) {
+            if (shape.type >= 13 && shape.type <= 15) { // Lines
+                if (shape.points.size() >= 2) {
+                    if (shape.type == 13)
+                        DrawLineDDA(hdc, shape.points[0].x, shape.points[0].y,
+                            shape.points[1].x, shape.points[1].y, shape.color);
+                    else if (shape.type == 14)
+                        DrawLineMidpoint(hdc, shape.points[0].x, shape.points[0].y,
+                            shape.points[1].x, shape.points[1].y, shape.color);
+                    else if (shape.type == 15)
+                        DrawLineParametric(hdc, shape.points[0].x, shape.points[0].y,
+                            shape.points[1].x, shape.points[1].y, shape.color);
+                }
+            }
+            else if (shape.type >= 16 && shape.type <= 20) { // Circles
+                if (shape.type == 16)
+                    DrawCircleDirect(hdc, shape.center.x, shape.center.y, shape.size1, shape.color);
+                else if (shape.type == 17)
+                    DrawCirclePolar(hdc, shape.center.x, shape.center.y, shape.size1, shape.color);
+                else if (shape.type == 18)
+                    DrawCircleIterativePolar(hdc, shape.center.x, shape.center.y, shape.size1, shape.color);
+                else if (shape.type == 19)
+                    DrawCircleMidpoint(hdc, shape.center.x, shape.center.y, shape.size1, shape.color);
+                else if (shape.type == 20)
+                    DrawCircleModified(hdc, shape.center.x, shape.center.y, shape.size1, shape.color);
+            }
+            else if (shape.type >= 21 && shape.type <= 23) { // Ellipses
+                if (shape.type == 21)
+                    DrawEllipseDirect(hdc, shape.center.x, shape.center.y, shape.size1, shape.size2, shape.color);
+                else if (shape.type == 22)
+                    DrawEllipsePolar(hdc, shape.center.x, shape.center.y, shape.size1, shape.size2, shape.color);
+                else if (shape.type == 23)
+                    DrawEllipseMidpoint(hdc, shape.center.x, shape.center.y, shape.size1, shape.size2, shape.color);
+            }
+            else if (shape.type >= 1 && shape.type <= 4) { // Circle Fill Lines
+                DrawCircleFillLines(hdc, shape.center.x, shape.center.y, shape.size1, shape.color, shape.type);
+            }
+            else if (shape.type >= 5 && shape.type <= 8) { // Circle Fill Circles
+                DrawCircleFillCircles(hdc, shape.center.x, shape.center.y, shape.size1, shape.color, shape.type - 4);
+            }
+            else if (shape.type == 9) { // Square (Hermite)
+                if (!shape.points.empty() && shape.points.size() >= 4) {
+                    int x1 = shape.points[0].x, y1 = shape.points[0].y;
+                    FillSquareWithHermite(hdc, x1, y1, shape.size1, shape.color);
+                }
+            }
+            else if (shape.type == 10) { // Rectangle (Bezier)
+                if (!shape.points.empty() && shape.points.size() >= 4) {
+                    int x1 = shape.points[0].x, y1 = shape.points[0].y;
+                    FillRectangleWithBezier(hdc, x1, y1, shape.size1, shape.size2, shape.color);
+                }
+            }
+            else if (shape.type == 11) { // Polygon (Convex/Non-Convex)
+                if (!shape.points.empty() && shape.points.size() >= 3) {
+                    HPEN pen = CreatePen(PS_SOLID, 1, shape.color);
+                    HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+                    FillPolygon(hdc, shape.points, shape.color);
+                    SelectObject(hdc, oldPen);
+                    DeleteObject(pen);
+                }
+            }
+            else if (shape.type == 12) { // Cardinal Spline
+                if (shape.points.size() >= 2) {
+                    DrawCardinalSpline(hdc, shape.points, shape.tension, g_numSegments, shape.color);
+                }
+            }
+            else if (shape.type == 24) {
+                if (!shape.points.empty()) {
+                    COLORREF oldColor = GetPixel(hdc, shape.points[0].x, shape.points[0].y);
+                    if (shape.subtype == ID_FLOOD_RECURSIVE)
+                        FloodFillRecursive(hdc, shape.points[0].x, shape.points[0].y, shape.color, oldColor, RGB(0, 0, 0), hwnd);
+                    else if (shape.subtype == ID_FLOOD_ITERATIVE)
+                        FloodFillIterative(hdc, shape.points[0].x, shape.points[0].y, shape.color, oldColor, RGB(0, 0, 0), hwnd);
+                }
+            }
+            else if (shape.type >= 25 && shape.type <= 29) { // Clipping
+                if (shape.type == 25 || shape.type == 28) { // Point Clipping
+                    ClipRect rect = (shape.type == 25) ? g_clipRect : ClipRect(100, 100, 300, 300);
+                    if (!shape.points.empty() && ClipPoint(shape.points[0], rect)) {
+                        SetPixel(hdc, shape.points[0].x, shape.points[0].y, shape.color);
+                    }
+                }
+                else if (shape.type == 26 || shape.type == 29) { // Line Clipping
+                    ClipRect rect = (shape.type == 26) ? g_clipRect : ClipRect(100, 100, 300, 300);
+                    if (shape.points.size() >= 2) {
+                        Point p1 = shape.points[0], p2 = shape.points[1];
+                        if (ClipLine(p1, p2, rect)) {
+                            DrawLineDDA(hdc, p1.x, p1.y, p2.x, p2.y, shape.color);
+                        }
+                    }
+                }
+                else if (shape.type == 27) { // Polygon Clipping
+                    if (!shape.points.empty()) {
+                        HPEN pen = CreatePen(PS_SOLID, 1, shape.color);
+                        HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+                        MoveToEx(hdc, shape.points[0].x, shape.points[0].y, NULL);
+                        for (size_t i = 1; i < shape.points.size(); i++) {
+                            DrawLineDDA(hdc, shape.points[i - 1].x, shape.points[i - 1].y, shape.points[i].x, shape.points[i].y, shape.color);
+                        }
+                        DrawLineDDA(hdc, shape.points.back().x, shape.points.back().y, shape.points[0].x, shape.points[0].y, shape.color); // Close
+                        SelectObject(hdc, oldPen);
+                        DeleteObject(pen);
+                    }
+                }
+            }
+        }
+        for (const auto& polygon : drawnPolygons) {
+            if (polygon.size() > 1) {
+                HPEN pen = CreatePen(PS_SOLID, 1, g_selectedColor);
+                HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+                MoveToEx(hdc, polygon[0].x, polygon[0].y, NULL);
+                for (size_t i = 1; i < polygon.size(); i++) {
+                    DrawLineDDA(hdc, polygon[i - 1].x, polygon[i - 1].y, polygon[i].x, polygon[i].y, g_selectedColor);
+                }
+                DrawLineDDA(hdc, polygon.back().x, polygon.back().y, polygon[0].x, polygon[0].y, g_selectedColor); // Close
+                SelectObject(hdc, oldPen);
+                DeleteObject(pen);
+            }
+        }
+        if (!currentPolygon.empty() && g_clippingMode && g_selectedShape != 11) {
+            HPEN pen = CreatePen(PS_SOLID, 2, RGB(0, 0, 255));
+            HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+            vector<Point> clippedCurrent = sutherlandHodgmanClip(currentPolygon, g_clipRect);
+            if (clippedCurrent.size() > 1) {
+                MoveToEx(hdc, clippedCurrent[0].x, clippedCurrent[0].y, NULL);
+                for (size_t i = 1; i < clippedCurrent.size(); i++) {
+                    DrawLineDDA(hdc, clippedCurrent[i - 1].x, clippedCurrent[i - 1].y, clippedCurrent[i].x, clippedCurrent[i].y, RGB(0, 0, 255));
+                }
+                if (clippedCurrent.size() > 2) {
+                    DrawLineDDA(hdc, clippedCurrent.back().x, clippedCurrent.back().y, clippedCurrent[0].x, clippedCurrent[0].y, RGB(0, 0, 255));
+                }
+            }
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+        }
+        // Draw temporary polygon points or control points
+        if (!g_tempPolygonPoints.empty() && g_selectedShape == 11 && !g_clippingMode) {
+            HPEN pen = CreatePen(PS_SOLID, 1, g_selectedColor);
+            HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+            FillPolygon(hdc, g_tempPolygonPoints, g_selectedColor); // Fill the polygon
+            for (size_t i = 0; i < g_tempPolygonPoints.size(); i++) {
+                SetPixel(hdc, g_tempPolygonPoints[i].x, g_tempPolygonPoints[i].y, g_selectedColor);
+                if (i > 0) {
+                    DrawLineDDA(hdc, g_tempPolygonPoints[i - 1].x, g_tempPolygonPoints[i - 1].y,
+                        g_tempPolygonPoints[i].x, g_tempPolygonPoints[i].y, g_selectedColor);
+                }
+            }
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+        }
+        if (!g_tempControlPoints.empty()) {
+            HPEN pen = CreatePen(PS_SOLID, 1, g_selectedColor);
+            HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+            for (size_t i = 0; i < g_tempControlPoints.size(); i++) {
+                SetPixel(hdc, g_tempControlPoints[i].x, g_tempControlPoints[i].y, g_selectedColor);
+            }
+            if (g_tempControlPoints.size() >= 2) {
+                DrawCardinalSpline(hdc, g_tempControlPoints, g_tension, g_numSegments, g_selectedColor);
+            }
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+        }
+
+        // Draw clipping rectangle or square
+        if (g_clippingMode) {
+            ClipRect rect = (g_selectedShape == 28 || g_selectedShape == 29) ? ClipRect(100, 100, 300, 300) : g_clipRect;
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+            HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+            MoveToEx(hdc, rect.xmin, rect.ymin, NULL);
+            LineTo(hdc, rect.xmax, rect.ymin);
+            LineTo(hdc, rect.xmax, rect.ymax);
+            LineTo(hdc, rect.xmin, rect.ymax);
+            LineTo(hdc, rect.xmin, rect.ymin);
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+        }
+
+        EndPaint(hwnd, &ps);
+        break;
+    }
+
+    case WM_SETCURSOR: {
+        if (LOWORD(lParam) == HTCLIENT) {
+            SetCursor(g_hCursor);
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_DESTROY: {
+        if (g_hbrBackground) DeleteObject(g_hbrBackground);
+        if (g_hMenu) DestroyMenu(g_hMenu);
+        FreeConsole();
+        PostQuitMessage(0);
+        break;
+    }
+
+    default:
+        return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+    return 0;
+}
+
+// ================== ENTRY POINT ==================
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    WNDCLASSEX wc = { 0 };
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"GraphicsApp";
+    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hIconSm = LoadIcon(NULL, IDI_APPLICATION);
+
+    if (!RegisterClassEx(&wc)) {
+        MessageBox(NULL, L"Window Registration Failed!", L"Error", MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    HWND hwnd = CreateWindow(
+        L"GraphicsApp",
+        L"Graphics Application",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1200, 1200,
+        NULL, NULL, hInstance, NULL
+    );
+
+    if (!hwnd) {
+        MessageBox(NULL, L"Window Creation Failed!", L"Error", MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    ShowWindow(hwnd, nCmdShow);
+    UpdateWindow(hwnd);
+
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    return (int)msg.wParam;
+}
