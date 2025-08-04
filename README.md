@@ -39,8 +39,7 @@ A feature-rich graphics application built with C++ and Win32 API, implementing v
 1. **Using Code::Blocks**:
    ```bash
    # Open the project file (.cbp) and build
-Command Line (MinGW):
-
-bash
-g++ main.cpp -o graphics_app -lcomdlg32 -lgdi32 -luser32 -lkernel32
+###Command Line (MinGW):
+```bash
+# g++ main.cpp -o graphics_app -lcomdlg32 -lgdi32 -luser32 -lkernel32
 
